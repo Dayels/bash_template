@@ -1,0 +1,509 @@
+#!/usr/bin/env bash
+
+# Шаблон для скриптов
+# основано на https://github.com/pforret/bashew 1.20.2
+# а также https://gist.github.com/m-radzikowski/53e0b39e9a59a1518990e76c2bff8038
+
+# Как с этим работать?
+# 1. Задать флаги/опции/параметры и значения по умолчанию для них в Option:config
+#    - примечание: для парсинга используется интерпритатор, так что лучше не запускать под рутом
+# 2. 
+
+# RUN_AS_ROOT: 0 = не проверять / 
+#              1 = скрипт ДОЛЖЕН запускаться под root /
+#             -1 = скрипт НЕ ДОЛЖЕН запускаться под root
+readonly RUN_AS_ROOT=-1 
+
+__main__() {
+    true
+}
+
+#####################################################################
+################ НЕ ВНОСИ ИЗМЕНЕНИЙ НИЖЕ ЭТОЙ СТРОКИ ################
+#####################################################################
+
+# Строгий режим
+# Выключи если любишь дебажить
+# http://redsymbol.net/articles/unofficial-bash-strict-mode/
+set -euo pipefail
+IFS=$'\n\t'
+
+# установка некоторых флагов до парсинга
+# включает дебаг сообщения
+VERBOSE=0
+[[ $# -gt 0 ]] && { [[ $1 == "-v" ]] || [[ $1 == "--vebose" ]]; } && VERBOSE=1
+# выключает все сообщения из IO:
+QUIET=0
+[[ $# -gt 0 ]] && { [[ $1 == "-q" ]] || [[ $1 == "--quiet" ]]; } && QUIET=1
+
+# параметры для дебага
+
+# Неиспользуемый параметр оставил на твоё усмотрение
+# Предполагает запуск скрипта без внесения каких-то фактических изменений
+# Например 
+DRY_RUN=0
+# shellcheck disable=SC2034
+[[ $# -gt 0 ]] && [[ $1 == "--dry-run" ]] && DRY_RUN=1
+# проверка синтаксиса
+[[ $# -gt 0 ]] && [[ $1 == "--check" ]] && set -n
+# дебаг баша
+[[ $# -gt 0 ]] && [[ $1 == "-vvv" ]] && set -x
+
+function IO:setup() {
+    # определить перенаправляется ли стандартный вывод куда-то
+    # shellcheck disable=SC2034
+    if [[ -t 1 ]]; then
+        PIPED=1
+        TRED=$(tput setaf 1) TGREEN=$(tput setaf 2)
+        TYELLOW=$(tput setaf 3) TBLUE=$(tput setaf 4)
+        TPURPLE=$(tput setaf 5) TCYAN=$(tput setaf 6)
+        TBOLD=$(tput bold) TITALIC=$(tput sitm)
+        TUNDERLINE=$(tput smul) TRESET=$(tput sgr0)
+    else
+        PIPED=0
+        TRED='' TGREEN='' TYELLOW='' TBLUE=''
+        TPURPLE='' TCYAN='' TBOLD='' TITALIC=''
+        TUNDERLINE='' TRESET=''
+    fi
+    # Вдруг захочется
+    ERROR_COLOR="${TRED}"
+    WARN_COLOR="${TYELLOW}"
+    INFO_COLOR="${TGREEN}"
+    DEBUG_COLOR="${TCYAN}"
+    # Для вывода сообщений
+    ERROR_PREFIX="${ERROR_COLOR}ERROR${TRESET}: "
+    WARN_PREFIX="${WARN_COLOR}WARN${TRESET}: "
+    INFO_PREFIX="${INFO_COLOR}INFO${TRESET}: "
+    DEBUG_PREFIX="${DEBUG_COLOR}DEBUG${TRESET}: "
+}
+
+function IO:print() {
+    ((QUIET)) && true || printf '%b\n' "$*"
+}
+
+function IO:debug() {
+    ((VERBOSE)) && IO:print "${DEBUG_PREFIX}$*" >&2
+    return 0
+}
+
+function IO:info() {
+    IO:print "${INFO_PREFIX}$*" >&2
+}
+
+function IO:warn() {
+    IO:print "${WARN_PREFIX}$*" >&2
+}
+
+function IO:error() {
+    IO:print "${ERROR_PREFIX}$*" >&2
+}
+
+function IO:die() {
+    IO:error "Критичная ошибка: $*"
+    exit 1
+}
+
+function IO:log() {
+    local level=$1
+    local time=$(date '+%H:%M:%S')
+    # case "${level}"
+}
+
+function IO:progress() {
+    ((QUIET)) || (
+        local screen_width
+        screen_width=$(tput cols 2>/dev/null || echo 80)
+        local rest_of_line
+        rest_of_line=$((screen_width - 5))
+        if ((PIPED)); then
+            IO:print "... $*" >&2
+        else
+            printf "... %-${rest_of_line}b\r" "$*                                             " >&2
+        fi
+    )
+}
+
+function IO:countdown() {
+    local seconds=${1:-5}
+    local message=${2:-Ожидание :}
+
+    if ((PIPED)); then
+        IO:print "$message $seconds сек"
+    else
+        for ((i = 0; i < "$seconds"; i++)); do
+            IO:progress "${INFO_COLOR}$message $((seconds - i)) сек${TRESET}"
+            sleep 1
+        done
+        IO:print "                         "
+    fi
+}
+
+### Работа со строками
+
+function Str:trim() {
+  local var="$*"
+  # remove leading whitespace characters
+  var="${var#"${var%%[![:space:]]*}"}"
+  # remove trailing whitespace characters
+  var="${var%"${var##*[![:space:]]}"}"
+  printf '%s' "$var"
+}
+
+function Str:lower() {
+  if [[ -n "$1" ]]; then
+    local input="$*"
+    echo "${input,,}"
+  else
+    awk '{print tolower($0)}'
+  fi
+}
+
+function Str:upper() {
+  if [[ -n "$1" ]]; then
+    local input="$*"
+    echo "${input^^}"
+  else
+    awk '{print toupper($0)}'
+  fi
+}
+
+function Str:ascii() {
+  # remove all characters with accents/diacritics to latin alphabet
+  # shellcheck disable=SC2020
+  sed 'y/àáâäæãåāǎçćčèéêëēėęěîïííīįìǐłñńôöòóœøōǒõßśšûüǔùǖǘǚǜúūÿžźżÀÁÂÄÆÃÅĀǍÇĆČÈÉÊËĒĖĘĚÎÏÍÍĪĮÌǏŁÑŃÔÖÒÓŒØŌǑÕẞŚŠÛÜǓÙǕǗǙǛÚŪŸŽŹŻ/aaaaaaaaaccceeeeeeeeiiiiiiiilnnooooooooosssuuuuuuuuuuyzzzAAAAAAAAACCCEEEEEEEEIIIIIIIILNNOOOOOOOOOSSSUUUUUUUUUUYZZZ/'
+}
+
+function Str:slugify() {
+  # Str:slugify <input> <separator>
+  # Str:slugify "Jack, Jill & Clémence LTD"      => jack-jill-clemence-ltd
+  # Str:slugify "Jack, Jill & Clémence LTD" "_"  => jack_jill_clemence_ltd
+  separator="${2:-}"
+  [[ -z "$separator" ]] && separator="-"
+  Str:lower "$1" |
+    Str:ascii |
+    awk '{
+          gsub(/[\[\]@#$%^&*;,.:()<>!?\/+=_]/," ",$0);
+          gsub(/^  */,"",$0);
+          gsub(/  *$/,"",$0);
+          gsub(/  */,"-",$0);
+          gsub(/[^a-z0-9\-]/,"");
+          print;
+          }' |
+    sed "s/-/$separator/g"
+}
+
+function Str:title() {
+  # Str:title <input> <separator>
+  # Str:title "Jack, Jill & Clémence LTD"     => JackJillClemenceLtd
+  # Str:title "Jack, Jill & Clémence LTD" "_" => Jack_Jill_Clemence_Ltd
+  separator="${2:-}"
+  # shellcheck disable=SC2020
+  Str:lower "$1" |
+    tr 'àáâäæãåāçćčèéêëēėęîïííīįìłñńôöòóœøōõßśšûüùúūÿžźż' 'aaaaaaaaccceeeeeeeiiiiiiilnnoooooooosssuuuuuyzzz' |
+    awk '{ gsub(/[\[\]@#$%^&*;,.:()<>!?\/+=_-]/," ",$0); print $0; }' |
+    awk '{
+          for (i=1; i<=NF; ++i) {
+              $i = toupper(substr($i,1,1)) tolower(substr($i,2))
+          };
+          print $0;
+          }' |
+    sed "s/ /$separator/g" |
+    cut -c1-50
+}
+
+function Str:digest() {
+  local length=${1:-6}
+  if [[ -n $(command -v md5sum) ]]; then
+    # regular linux
+    md5sum | cut -c1-"$length"
+  else
+    # macos
+    md5 | cut -c1-"$length"
+  fi
+}
+
+function Math:calc() {
+  awk "BEGIN {print $*} ; "
+}
+
+function Math:round() {
+  local number="${1}"
+  local decimals="${2:-0}"
+
+  awk "BEGIN {print sprintf( \"%.${decimals}f\" , $number )};"
+}
+
+function Os:time() {
+  if [[ $(command -v perl) ]]; then
+    perl -MTime::HiRes=time -e 'printf "%f\n", time'
+  elif [[ $(command -v php) ]]; then
+    php -r 'printf("%f\n",microtime(true));'
+  elif [[ $(command -v python) ]]; then
+    python -c 'import time; print(time.time()) '
+  elif [[ $(command -v python3) ]]; then
+    python3 -c 'import time; print(time.time()) '
+  elif [[ $(command -v node) ]]; then
+    node -e 'console.log(+new Date() / 1000)'
+  elif [[ $(command -v ruby) ]] ; then
+    ruby -e 'STDOUT.puts(Time.now.to_f)'
+  else
+    date '+%s.%N'
+  fi
+}
+
+function Os:tempfile() {
+  local extension=${1:-txt}
+  local file="${tmp_dir:-/tmp}/$execution_day.$RANDOM.$extension"
+  IO:debug "$tmp_file: $file"
+  temp_files+=("$file")
+  echo "$file"
+}
+
+Option:usage() {
+  IO:print "Program : ${txtInfo}$script_basename${txtReset}  by ${txtWarn}$script_author${txtReset}"
+  IO:print "Version : ${txtInfo}v$script_version${txtReset} (${txtWarn}$script_modified${txtReset})"
+  IO:print "Purpose : ${txtInfo}$script_description${txtReset}"
+  echo -n  "Usage   : $script_basename"
+  Option:config |
+    awk '
+  BEGIN { FS="|"; OFS=" "; oneline="" ; fulltext="Flags, options and parameters:"}
+  $1 ~ /flag/  {
+    fulltext = fulltext sprintf("\n    -%1s|--%-12s: [flag] %s [default: off]",$2,$3,$4) ;
+    oneline  = oneline " [-" $2 "]"
+    }
+  $1 ~ /option/  {
+    fulltext = fulltext sprintf("\n    -%1s|--%-12s: [option] %s",$2,$3 " <?>",$4) ;
+    if($5!=""){fulltext = fulltext "  [default: " $5 "]"; }
+    oneline  = oneline " [-" $2 " <" $3 ">]"
+    }
+  $1 ~ /list/  {
+    fulltext = fulltext sprintf("\n    -%1s|--%-12s: [list] %s (array)",$2,$3 " <?>",$4) ;
+    fulltext = fulltext "  [default empty]";
+    oneline  = oneline " [-" $2 " <" $3 ">]"
+    }
+  $1 ~ /secret/  {
+    fulltext = fulltext sprintf("\n    -%1s|--%s <%s>: [secret] %s",$2,$3,"?",$4) ;
+      oneline  = oneline " [-" $2 " <" $3 ">]"
+    }
+  $1 ~ /param/ {
+    if($2 == "1"){
+          fulltext = fulltext sprintf("\n    %-17s: [parameter] %s","<"$3">",$4);
+          oneline  = oneline " <" $3 ">"
+     }
+     if($2 == "?"){
+          fulltext = fulltext sprintf("\n    %-17s: [parameter] %s (optional)","<"$3">",$4);
+          oneline  = oneline " <" $3 "?>"
+     }
+     if($2 == "n"){
+          fulltext = fulltext sprintf("\n    %-17s: [parameters] %s (1 or more)","<"$3">",$4);
+          oneline  = oneline " <" $3 " …>"
+     }
+    }
+  $1 ~ /choice/ {
+        fulltext = fulltext sprintf("\n    %-17s: [choice] %s","<"$3">",$4);
+        if($5!=""){fulltext = fulltext "  [options: " $5 "]"; }
+        oneline  = oneline " <" $3 ">"
+    }
+    END {print oneline; print fulltext}
+  '
+}
+
+function Option:filter() {
+  Option:config | grep "$1|" | cut -d'|' -f3 | sort | grep -v '^\s*$'
+}
+
+function Script:show_required() {
+  grep 'Os:require' "$script_install_path" |
+    grep -v -E '\(\)|grep|# Os:require' |
+    awk -v install="# $install_package " '
+    function ltrim(s) { sub(/^[ "\t\r\n]+/, "", s); return s }
+    function rtrim(s) { sub(/[ "\t\r\n]+$/, "", s); return s }
+    function trim(s) { return rtrim(ltrim(s)); }
+    NF == 2 {print install trim($2); }
+    NF == 3 {print install trim($3); }
+    NF > 3  {$1=""; $2=""; $0=trim($0); print "# " trim($0);}
+  ' |
+    sort -u
+}
+
+function Option:initialize() {
+  local init_command
+  init_command=$(Option:config |
+    grep -v "verbose|" |
+    awk '
+    BEGIN { FS="|"; OFS=" ";}
+    $1 ~ /flag/   && $5 == "" {print $3 "=0; "}
+    $1 ~ /flag/   && $5 != "" {print $3 "=\"" $5 "\"; "}
+    $1 ~ /option/ && $5 == "" {print $3 "=\"\"; "}
+    $1 ~ /option/ && $5 != "" {print $3 "=\"" $5 "\"; "}
+    $1 ~ /choice/   {print $3 "=\"\"; "}
+    $1 ~ /list/     {print $3 "=(); "}
+    $1 ~ /secret/   {print $3 "=\"\"; "}
+    ')
+  if [[ -n "$init_command" ]]; then
+    eval "$init_command"
+  fi
+}
+
+function Option:has_single() { Option:config | grep 'param|1|' > /dev/null; }
+function Option:has_choice() { Option:config | grep 'choice|1' > /dev/null; }
+function Option:has_optional() { Option:config | grep 'param|?|' > /dev/null; }
+function Option:has_multi() { Option:config | grep 'param|n|' > /dev/null; }
+
+function Option:parse() {
+  if [[ $# -eq 0 ]]; then
+    Option:usage >&2
+    Script:exit
+  fi
+
+  ## first process all the -x --xxxx flags and options
+  while true; do
+    # flag <flag> is saved as $flag = 0/1
+    # option <option> is saved as $option
+    if [[ $# -eq 0 ]]; then
+      ## all parameters processed
+      break
+    fi
+    if [[ ! $1 == -?* ]]; then
+      ## all flags/options processed
+      break
+    fi
+    local save_option
+    save_option=$(Option:config |
+      awk -v opt="$1" '
+        BEGIN { FS="|"; OFS=" ";}
+        $1 ~ /flag/   &&  "-"$2 == opt {print $3"=1"}
+        $1 ~ /flag/   && "--"$3 == opt {print $3"=1"}
+        $1 ~ /option/ &&  "-"$2 == opt {print $3"=${2:-}; shift"}
+        $1 ~ /option/ && "--"$3 == opt {print $3"=${2:-}; shift"}
+        $1 ~ /list/ &&  "-"$2 == opt {print $3"+=(${2:-}); shift"}
+        $1 ~ /list/ && "--"$3 == opt {print $3"=(${2:-}); shift"}
+        $1 ~ /secret/ &&  "-"$2 == opt {print $3"=${2:-}; shift #noshow"}
+        $1 ~ /secret/ && "--"$3 == opt {print $3"=${2:-}; shift #noshow"}
+        ')
+    if [[ -n "$save_option" ]]; then
+      if echo "$save_option" | grep shift >> /dev/null; then
+        local save_var
+        save_var=$(echo "$save_option" | cut -d= -f1)
+        IO:debug "$config_icon parameter: ${save_var}=$2"
+      else
+        IO:debug "$config_icon flag: $save_option"
+      fi
+      eval "$save_option"
+    else
+      IO:die "cannot interpret option [$1]"
+    fi
+    shift
+  done
+
+  ((help)) && (
+    Option:usage
+    Script:check_version
+    IO:print "                                  "
+    echo "### TIPS & EXAMPLES"
+    Script:show_tips
+
+  ) && Script:exit
+
+  local option_list
+  local option_count
+  local choices
+  local single_params
+  ## then run through the given parameters
+  if Option:has_choice; then
+    choices=$(Option:config | awk -F"|" '
+      $1 == "choice" && $2 == 1 {print $3}
+      ')
+    option_list=$(xargs <<< "$choices")
+    option_count=$(wc <<< "$choices" -w | xargs)
+    IO:debug "$config_icon Expect : $option_count choice(s): $option_list"
+    [[ $# -eq 0 ]] && IO:die "need the choice(s) [$option_list]"
+
+    local choices_list
+    local valid_choice
+    for param in $choices; do
+      [[ $# -eq 0 ]] && IO:die "need choice [$param]"
+      [[ -z "$1" ]] && IO:die "need choice [$param]"
+      IO:debug "$config_icon Assign : $param=$1"
+      # check if choice is in list
+      choices_list=$(Option:config | awk -F"|" -v choice="$param" '$1 == "choice" && $3 = choice {print $5}')
+      valid_choice=$(tr <<< "$choices_list" "," "\n" | grep "$1")
+      [[ -z "$valid_choice" ]] && IO:die "choice [$1] is not valid, should be in list [$choices_list]"
+
+      eval "$param=\"$1\""
+      shift
+    done
+  else
+    IO:debug "$config_icon No choices to process"
+    choices=""
+    option_count=0
+  fi
+
+  if Option:has_single; then
+    single_params=$(Option:config | awk -F"|" '
+      $1 == "param" && $2 == 1 {print $3}
+      ')
+    option_list=$(xargs <<< "$single_params")
+    option_count=$(wc <<< "$single_params" -w | xargs)
+    IO:debug "$config_icon Expect : $option_count single parameter(s): $option_list"
+    [[ $# -eq 0 ]] && IO:die "need the parameter(s) [$option_list]"
+
+    for param in $single_params; do
+      [[ $# -eq 0 ]] && IO:die "need parameter [$param]"
+      [[ -z "$1" ]] && IO:die "need parameter [$param]"
+      IO:debug "$config_icon Assign : $param=$1"
+      eval "$param=\"$1\""
+      shift
+    done
+  else
+    IO:debug "$config_icon No single params to process"
+    single_params=""
+    option_count=0
+  fi
+
+  if Option:has_optional; then
+    local optional_params
+    local optional_count
+    optional_params=$(Option:config | grep 'param|?|' | cut -d'|' -f3)
+    optional_count=$(wc <<< "$optional_params" -w | xargs)
+    IO:debug "$config_icon Expect : $optional_count optional parameter(s): $(echo "$optional_params" | xargs)"
+
+    for param in $optional_params; do
+      IO:debug "$config_icon Assign : $param=${1:-}"
+      eval "$param=\"${1:-}\""
+      shift
+    done
+  else
+    IO:debug "$config_icon No optional params to process"
+    optional_params=""
+    optional_count=0
+  fi
+
+  if Option:has_multi; then
+    #IO:debug "Process: multi param"
+    local multi_count
+    local multi_param
+    multi_count=$(Option:config | grep -c 'param|n|')
+    multi_param=$(Option:config | grep 'param|n|' | cut -d'|' -f3)
+    IO:debug "$config_icon Expect : $multi_count multi parameter: $multi_param"
+    ((multi_count > 1)) && IO:die "cannot have >1 'multi' parameter: [$multi_param]"
+    ((multi_count > 0)) && [[ $# -eq 0 ]] && IO:die "need the (multi) parameter [$multi_param]"
+    # save the rest of the params in the multi param
+    if [[ -n "$*" ]]; then
+      IO:debug "$config_icon Assign : $multi_param=$*"
+      eval "$multi_param=( $* )"
+    fi
+  else
+    multi_count=0
+    multi_param=""
+    [[ $# -gt 0 ]] && IO:die "cannot interpret extra parameters"
+  fi
+}
+
+IO:setup
+__meta__
+
+[[ $RUN_AS_ROOT == 1 ]] && [[ $UID -ne 0 ]] && IO:error "user is $USER, MUST be root to run [$script_basename]" && return 1
+[[ $RUN_AS_ROOT == -1 ]] && [[ $UID -eq 0 ]] && IO:error "user is $USER, CANNOT be root to run [$script_basename]" && return 1
+
+__main__
